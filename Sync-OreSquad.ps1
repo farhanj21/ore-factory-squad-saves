@@ -186,40 +186,54 @@ function Invoke-Pull {
 function Invoke-Push {
     $porcelain = Get-Porcelain
     $changed = @($porcelain | Where-Object { $_ })
-    if ($changed.Count -eq 0) {
+    $pending = 0
+    try { $pending = [int]((& git -C $scriptRoot rev-list --count origin/main..HEAD).Trim()) } catch {}
+
+    if ($changed.Count -eq 0 -and $pending -eq 0) {
         Write-OK "Nothing to commit or push - save is up to date."
         return
     }
 
-    $msg = New-CommitMessage $Slot
+    if ($changed.Count -gt 0) {
+        $msg = New-CommitMessage $Slot
 
-    Write-Host ""
-    Write-Host "Proposed commit message:" -ForegroundColor Magenta
-    Write-Host "  $($msg.Subject)" -ForegroundColor Magenta
-    Write-Host "  $($msg.Body)" -ForegroundColor Magenta
-    Write-Host "  $($msg.World)" -ForegroundColor Magenta
-    Write-Host ""
+        Write-Host ""
+        Write-Host "Proposed commit message:" -ForegroundColor Magenta
+        Write-Host "  $($msg.Subject)" -ForegroundColor Magenta
+        Write-Host "  $($msg.Body)" -ForegroundColor Magenta
+        Write-Host "  $($msg.World)" -ForegroundColor Magenta
+        Write-Host ""
 
-    if (-not $AutoPush) {
-        $answer = Read-Host "Commit and push? (y/n)"
-        if ($answer -notmatch '^y') {
-            Write-Warn "Skipping. Nothing was committed - run with -Push when ready."
-            return
+        if (-not $AutoPush) {
+            $answer = Read-Host "Commit and push? (y/n)"
+            if ($answer -notmatch '^y') {
+                Write-Warn "Skipping. Nothing was committed - run with -Push when ready."
+                return
+            }
+            $note = Read-Host "Note for this session? (Enter to skip)"
+        } else {
+            $note = ''
         }
-        $note = Read-Host "Note for this session? (Enter to skip)"
-    } else {
-        $note = ''
-    }
 
-    $commitFile = Write-CommitFile $msg $note
-    & git -C $scriptRoot add -A
-    & git -C $scriptRoot commit -F $commitFile
-    Remove-Item -LiteralPath $commitFile -ErrorAction SilentlyContinue
-    if ($LASTEXITCODE -ne 0) {
-        Write-Fail "Commit failed."
-        exit 1
+        $commitFile = Write-CommitFile $msg $note
+        & git -C $scriptRoot add -A
+        & git -C $scriptRoot commit -F $commitFile
+        Remove-Item -LiteralPath $commitFile -ErrorAction SilentlyContinue
+        if ($LASTEXITCODE -ne 0) {
+            Write-Fail "Commit failed."
+            exit 1
+        }
+        Write-OK "Committed: $($msg.Subject)"
+    } else {
+        Write-Warn "$pending earlier commit(s) were never pushed - pushing them now."
+        if (-not $AutoPush) {
+            $answer = Read-Host "Push now? (y/n)"
+            if ($answer -notmatch '^y') {
+                Write-Warn "Skipping. Nothing was pushed - run with -Push when ready."
+                return
+            }
+        }
     }
-    Write-OK "Committed: $($msg.Subject)"
 
     Write-Step "Pushing..."
     & git -C $scriptRoot push
