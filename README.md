@@ -1,71 +1,42 @@
 # Ore Factory Squad — 3-Player Co-op with Host-Left Continuity
 
-## Goal
-3 players share one world. If the host (the one who created the save) leaves,
-the remaining players can continue from the same world.
+The shared world lives in this git repo. Whoever hosts the game pulls the save first,
+and whoever hosted last pushes it back. That way the world survives any host leaving —
+no host-migration needed.
 
-## How the game works (analyzed)
-- Host-authoritative: the host's PC runs the server; the world save exists only
-  on the host's machine. No host migration exists in the game.
-- Save folder: C:\Users\<user>\AppData\LocalLow\threeW\Ore Factory Squad\Saves\<world>_<slot>\
-- Clients don't need the save to join (host streams the world); only the next
-  host needs it.
-- Multiplayer: Steam lobby + Steam P2P (Mirror + FizzySteam). 3-player online-fix
-  connections already work. All 3 must run the same game version (1.0.4).
-- Never sync: Player.log, Player-prev.log, RemoteConfigCache.json,
-  MultiplayerCache/ (client-side temp).
+---
 
-## Solution
-Use the game's Saves folder itself as a git repo backed by a private GitHub
-repo. The current host pushes the save; the next host pulls it, loads the same
-slot, and everyone rejoins.
+## The workflow (this is the whole thing)
 
-## Setup
-1. On the machine that owns the save, make Saves a git repo and push:
-```bash
-# Navigate to the Ore Factory Squad save directory
-cd "$HOME/AppData/LocalLow/threeW/Ore Factory Squad/Saves"
-
-# Initialize a Git repository
-git init
-
-# Add your GitHub repository as the remote
-git remote add origin https://github.com/<your-username>/ore-factory-squad-saves.git
-
-# Stage and commit your save files
-git add -A
-git commit -m "Initial save"
-
-# Push to GitHub
-git branch -M main
-git push -u origin main
 ```
-2. On the other 2 PCs: clone that repo into the same Saves folder location.
-3. Add a .gitignore in the repo:
-```bash
-   Player*.log
-   RemoteConfigCache.json
-   MultiplayerCache/
+PULL → PLAY → SAVE & QUIT → PUSH
 ```
 
-## Canonical setup (agreed)
-- Canonical save slot: **OFS_0001** (the world). OFS_0000 is the game's save-slot
-  index — do not delete it; sync it like any other file.
-- Game version: all 3 players must run **1.0.4**.
+1. **PULL** the latest save (game closed).
+2. **PLAY** — load slot **OFS_0001** and invite the other 2 via Steam.
+3. **SAVE & QUIT** the game.
+4. **PUSH** the save back (game closed) so the next host can continue.
 
-## Using the sync tool
-`Sync-OreSquad.ps1` wraps the whole loop so nobody has to touch raw git.
-Double-click `Sync-OreSquad.cmd` for a menu, or run the script directly:
+Repeat every session. Only one person hosts and pushes at a time.
+
+---
+
+## How to sync (use the tool, don't touch git)
+
+**Double-click `Sync-OreSquad.cmd`** → a menu asks: `1` Pull, `2` Push, `3` Full sync.
+
+Or run the script directly:
 
 | Command | When |
 |---|---|
 | `.\Sync-OreSquad.ps1 -Pull` | Before hosting (game closed) |
 | `.\Sync-OreSquad.ps1 -Push` | After playing/saving (game closed) |
 | `.\Sync-OreSquad.ps1` | Full handoff: pull then push |
-| `.\Sync-OreSquad.ps1 -Message "..."` | Override the commit subject |
+| `.\Sync-OreSquad.ps1 -Message "..."` | Custom commit subject |
 | `.\Sync-OreSquad.ps1 -AutoPush` | Skip the confirmation prompts |
 
-It prints a standard commit message built from the save files:
+The tool writes a clean, self-describing commit from the save files:
+
 ```
 save 2026-08-03 21:35 | edging and co. | day 6 | Lv4 | Ammar
 
@@ -74,24 +45,66 @@ World: edging and co. | players: 3 | progression: 6 | entities: 2467
 Note: <optional>
 ```
 
-Safety guards built in:
-- Refuses all git operations while the game is running.
-- Refuses to run if the script on disk differs from the committed version
-  (blocks a swapped-script attack).
-- Refuses to push to any remote other than the official repo.
-- Aborts on pull conflicts — never auto-merges or force-pushes. Rule on
-  conflict: stop, keep the newest save, push that one over the remote.
+---
 
-## Workflow
-- Routine: **pull (game closed) → play → save & quit → push (game closed)**.
-- Handoff: host saves & quits and pushes → next host pulls, loads slot
-  OFS_0001 → other 2 join via Steam invite.
-- If someone launches the game directly (not via the script): after quitting,
-  run `.\Sync-OreSquad.ps1 -Push` to sync — one command.
-- Rules: one host at a time; always pull before hosting; close the game before
-  any git operation; on pull conflict, stop, keep the newest save, push that.
+## Rules
 
-## Risks
-- Binary saves may grow large; if the repo passes ~1GB, enable Git LFS on
-  Saves/** or switch to cloud sync.
-- A crash resumes from the last pushed save, not the exact moment of the crash.
+- **Always pull before hosting.**
+- **The game must be closed for any pull/push** (the tool enforces this).
+- **One host at a time.** Only the current host pushes.
+- **On a conflict: stop. Keep the newest save, push that one over the remote.** The
+  tool never auto-merges or force-pushes.
+- Everyone runs the **same game version (1.0.4)**.
+
+---
+
+## One-time setup
+
+**Already done** on the machine that created the world (repo initialized, `.gitignore`
+added). For each new PC:
+
+```powershell
+git clone https://github.com/farhanj21/ore-factory-squad-saves.git "C:\Users\<you>\AppData\LocalLow\threeW\Ore Factory Squad\Saves"
+git -C "C:\Users\<you>\AppData\LocalLow\threeW\Ore Factory Squad\Saves" config core.autocrlf false
+```
+
+Set your git identity once (`git config --global user.name "You"` / `user.email`)
+so commits are attributed correctly.
+
+---
+
+## Save slots
+
+- **`OFS_0001/`** — the shared world (the one everyone loads). This is our canonical slot.
+- **`OFS_0000/`** — the game's save-slot index. **Do not delete it**; it just lists the
+  slots. Sync it like any other file.
+
+---
+
+## Optional: desktop shortcut
+
+Pin `Sync-OreSquad.cmd` to taskbar/Start, or create a desktop shortcut pointing at it,
+so syncing is a double-click away. (Not required — navigate to the Saves folder works too.)
+
+---
+
+## How it works (background)
+
+- The game is host-authoritative: the world save exists only on the host's machine
+  and there is no host migration. Clients don't need the save to join (the host streams
+  it) — only the *next host* needs it.
+- Multiplayer is Steam lobby + Steam P2P (Mirror + FizzySteam); all 3 must run 1.0.4.
+- The Saves folder is a git repo backed by a private GitHub repo. The host pushes; the
+  next host pulls, loads the same slot, and everyone rejoins.
+
+Never synced (gitignored): `Player*.log`, `RemoteConfigCache.json`, `MultiplayerCache/`.
+
+---
+
+## Troubleshooting
+
+- **A crash resumes from the last pushed save**, not the moment of the crash. Always
+  push after a session — that's your checkpoint.
+- **Save files grow large.** If the repo approaches ~1GB, enable Git LFS on `Saves/**`
+  or move to a cloud-sync tool.
+- **Direct launch (didn't use the tool)?** After quitting, run `.\Sync-OreSquad.ps1 -Push`.
