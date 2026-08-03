@@ -48,12 +48,46 @@ git push -u origin main
    MultiplayerCache/
 ```
 
+## Canonical setup (agreed)
+- Canonical save slot: **OFS_0001** (the world). OFS_0000 is the game's save-slot
+  index — do not delete it; sync it like any other file.
+- Game version: all 3 players must run **1.0.4**.
+
+## Using the sync tool
+`Sync-OreSquad.ps1` wraps the whole loop so nobody has to touch raw git.
+Double-click `Sync-OreSquad.cmd` for a menu, or run the script directly:
+
+| Command | When |
+|---|---|
+| `.\Sync-OreSquad.ps1 -Pull` | Before hosting (game closed) |
+| `.\Sync-OreSquad.ps1 -Push` | After playing/saving (game closed) |
+| `.\Sync-OreSquad.ps1` | Full handoff: pull then push |
+| `.\Sync-OreSquad.ps1 -Message "..."` | Override the commit subject |
+| `.\Sync-OreSquad.ps1 -AutoPush` | Skip the confirmation prompts |
+
+It prints a standard commit message built from the save files:
+```
+save 2026-08-03 21:35 | edging and co. | day 6 | Lv4 | Ammar
+
+Changed: 214 file(s) (42 chunk(s) dug) | slot OFS_0001
+World: edging and co. | players: 3 | progression: 6 | entities: 2467
+Note: <optional>
+```
+
+Safety guards built in:
+- Refuses all git operations while the game is running.
+- Refuses to run if the script on disk differs from the committed version
+  (blocks a swapped-script attack).
+- Refuses to push to any remote other than the official repo.
+- Aborts on pull conflicts — never auto-merges or force-pushes. Rule on
+  conflict: stop, keep the newest save, push that one over the remote.
+
 ## Workflow
-- Pull latest save → play → save & quit → commit & push. A small
-  Start-OreSquad.ps1 can wrap this: pull → launch game → on quit, commit+push
-  (with a pull-only mode).
-- Handoff: host saves & quits (push happens) → next host pulls, loads the same
-  save slot → other 2 join via Steam invite.
+- Routine: **pull (game closed) → play → save & quit → push (game closed)**.
+- Handoff: host saves & quits and pushes → next host pulls, loads slot
+  OFS_0001 → other 2 join via Steam invite.
+- If someone launches the game directly (not via the script): after quitting,
+  run `.\Sync-OreSquad.ps1 -Push` to sync — one command.
 - Rules: one host at a time; always pull before hosting; close the game before
   any git operation; on pull conflict, stop, keep the newest save, push that.
 
