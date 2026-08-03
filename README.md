@@ -47,6 +47,33 @@ Note: <optional>
 
 ---
 
+## Manual way (no script)
+
+Prefer plain git? The workflow is the same, just typed. **Game closed for every
+command.**
+
+**Before hosting / playing** — pull the latest save:
+
+```powershell
+cd "C:\Users\<you>\AppData\LocalLow\threeW\Ore Factory Squad\Saves"
+git pull
+```
+
+**After playing & saving** — commit and push back:
+
+```powershell
+cd "C:\Users\<you>\AppData\LocalLow\threeW\Ore Factory Squad\Saves"
+git add -A
+git commit -m "save <your-name> <date>"
+git push
+```
+
+Same rules apply: always pull before hosting, one host at a time, and on a pull
+conflict stop and keep the newest save. The `.gitignore` already keeps player logs
+and cache out of the commit automatically.
+
+---
+
 ## Rules
 
 - **Always pull before hosting.**
