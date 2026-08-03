@@ -1,6 +1,7 @@
 param(
     [switch]$Pull,
     [switch]$Push,
+    [switch]$Resolve,
     [switch]$AutoPush,
     [string]$Message,
     [string]$Slot = 'OFS_0001'
@@ -47,10 +48,22 @@ function Get-Porcelain {
     return @(& git -C $scriptRoot status --porcelain)
 }
 
-function Get-SaveStats($slot) {
+function Get-SaveStats {
+    param($slot, $fromGitRef = $null)
     $result = @{ Title = $null; Level = $null; Prog = $null; Day = $null; Players = $null; Entities = $null }
+    $metaPath = Join-Path $scriptRoot "$slot\game_data.meta"
+    $gzPath = Join-Path $scriptRoot "$slot\SAVE.GZ"
+    $tmpMeta = $null
+    $tmpGz = $null
     try {
-        $metaPath = Join-Path $scriptRoot "$slot\game_data.meta"
+        if ($fromGitRef) {
+            $tmpMeta = Join-Path $env:TEMP ("ofs_meta_" + [guid]::NewGuid().ToString('N'))
+            & cmd /c ('git -C "' + $scriptRoot + '" show "' + $fromGitRef + ':' + $slot + '/game_data.meta" > "' + $tmpMeta + '"')
+            $metaPath = $tmpMeta
+            $tmpGz = Join-Path $env:TEMP ("ofs_gz_" + [guid]::NewGuid().ToString('N'))
+            & cmd /c ('git -C "' + $scriptRoot + '" show "' + $fromGitRef + ':' + $slot + '/SAVE.GZ" > "' + $tmpGz + '"')
+            $gzPath = $tmpGz
+        }
         if (Test-Path -LiteralPath $metaPath) {
             $meta = Get-Content -Raw -LiteralPath $metaPath | ConvertFrom-Json
             $result.Title = $meta.m_Title
@@ -59,7 +72,6 @@ function Get-SaveStats($slot) {
         }
     } catch {}
     try {
-        $gzPath = Join-Path $scriptRoot "$slot\SAVE.GZ"
         if (Test-Path -LiteralPath $gzPath) {
             $bytes = [System.IO.File]::ReadAllBytes($gzPath)
             $ms = New-Object System.IO.MemoryStream(,$bytes)
@@ -74,33 +86,26 @@ function Get-SaveStats($slot) {
             $result.Entities = [regex]::Matches($json, '"m_Key"').Count
         }
     } catch {}
+    if ($tmpMeta) { Remove-Item -LiteralPath $tmpMeta -ErrorAction SilentlyContinue }
+    if ($tmpGz)   { Remove-Item -LiteralPath $tmpGz -ErrorAction SilentlyContinue }
     return $result
 }
 
-function Invoke-Pull {
-    $porcelain = Get-Porcelain
-    if (@($porcelain | Where-Object { $_ }).Count -gt 0) {
-        Write-Warn "Uncommitted changes found; skipping pull (your local save is newer)."
-        return
-    }
-    Write-Step "Pulling latest save..."
-    & git -C $scriptRoot pull --ff-only
-    if ($LASTEXITCODE -ne 0) {
-        Write-Fail "Pull failed. Rule: stop, keep the newest save, push that one over the remote."
-        exit 1
-    }
-    Write-OK "Up to date."
+function Show-SaveStats($s) {
+    $any = $false
+    if ($s.Title)   { Write-Host "    World:   $($s.Title)";   $any = $true }
+    if ($s.Day)     { Write-Host "    Day:     $($s.Day)";     $any = $true }
+    if ($s.Level)   { Write-Host "    Level:   $($s.Level)";   $any = $true }
+    if ($s.Players) { Write-Host "    Players: $($s.Players)"; $any = $true }
+    if ($s.Prog)    { Write-Host "    Prog:    $($s.Prog)";    $any = $true }
+    if ($s.Entities){ Write-Host "    Entities:$($s.Entities)"; $any = $true }
+    if (-not $any)  { Write-Host "    (no readable save data)" -ForegroundColor Yellow }
 }
 
-function Invoke-Push {
+function New-CommitMessage($slot) {
     $porcelain = Get-Porcelain
     $changed = @($porcelain | Where-Object { $_ })
-    if ($changed.Count -eq 0) {
-        Write-OK "Nothing to commit or push - save is up to date."
-        return
-    }
-
-    $stats = Get-SaveStats $Slot
+    $stats = Get-SaveStats $slot
     $chunksDug = @($porcelain | Where-Object { $_ -match '\.vox3$' }).Count
 
     $subject = $Message
@@ -116,19 +121,83 @@ function Invoke-Push {
         $subject = $parts -join ' | '
     }
 
-    $p2 = "Changed: $($changed.Count) file(s) ($chunksDug chunk(s) dug) | slot $Slot"
+    $p2 = "Changed: $($changed.Count) file(s) ($chunksDug chunk(s) dug) | slot $slot"
     $p3parts = @()
     if ($stats.Title)   { $p3parts += $stats.Title }
     if ($stats.Players) { $p3parts += "players: $($stats.Players)" }
     if ($stats.Prog)    { $p3parts += "progression: $($stats.Prog)" }
-    if ($stats.Entities) { $p3parts += "entities: $($stats.Entities)" }
+    if ($stats.Entities){ $p3parts += "entities: $($stats.Entities)" }
     $p3 = "World: " + ($p3parts -join ' | ')
+
+    return @{ Subject = $subject; Body = $p2; World = $p3 }
+}
+
+function Write-CommitFile($msg, $note) {
+    $tmp = Join-Path $env:TEMP ("ofs_commit_" + [guid]::NewGuid().ToString('N') + ".txt")
+    $text = $msg.Subject + "`n`n" + $msg.Body + "`n" + $msg.World
+    if ($note) { $text += "`n`nNote: $note" }
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($tmp, $text + "`n", $utf8)
+    return $tmp
+}
+
+function Invoke-Pull {
+    Write-Step "Fetching latest save..."
+    & git -C $scriptRoot fetch origin 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Fail "Fetch failed. Check your network connection and git credentials."
+        exit 1
+    }
+    $localHead = (& git -C $scriptRoot rev-parse HEAD).Trim()
+    $remoteHead = (& git -C $scriptRoot rev-parse origin/main).Trim()
+    $behind = 0; $ahead = 0
+    try { $behind = [int]((& git -C $scriptRoot rev-list --count HEAD..origin/main).Trim()) } catch {}
+    try { $ahead  = [int]((& git -C $scriptRoot rev-list --count origin/main..HEAD).Trim()) } catch {}
+    $dirty = @((Get-Porcelain) | Where-Object { $_ }).Count
+
+    if ($dirty -gt 0) {
+        if ($behind -gt 0) {
+            Write-Warn "You have unsaved local changes AND the remote has moved ahead."
+            Write-Host "    Run Resolve (option 4 / -Resolve) to compare both saves and keep the newest one." -ForegroundColor Yellow
+            exit 1
+        }
+        Write-Warn "You have an unsaved hosted session (you played and saved, but haven't handed it off)."
+        Write-Host "    Run Push (option 2) or Full sync (option 3) to upload it for the next host." -ForegroundColor Yellow
+        return
+    }
+    if ($behind -eq 0 -and $ahead -eq 0) {
+        Write-OK "Up to date."
+        return
+    }
+    if ($ahead -gt 0) {
+        Write-Warn "Local has un-pushed commit(s) from a previous session."
+        Write-Host "    Run Push (option 2) to hand the save off to the next host." -ForegroundColor Yellow
+        return
+    }
+    Write-Step "Pulling latest save..."
+    & git -C $scriptRoot merge --ff-only origin/main
+    if ($LASTEXITCODE -ne 0) {
+        Write-Fail "Pull failed. Rule: stop, keep the newest save, then run Resolve (option 4)."
+        exit 1
+    }
+    Write-OK "Up to date."
+}
+
+function Invoke-Push {
+    $porcelain = Get-Porcelain
+    $changed = @($porcelain | Where-Object { $_ })
+    if ($changed.Count -eq 0) {
+        Write-OK "Nothing to commit or push - save is up to date."
+        return
+    }
+
+    $msg = New-CommitMessage $Slot
 
     Write-Host ""
     Write-Host "Proposed commit message:" -ForegroundColor Magenta
-    Write-Host "  $subject" -ForegroundColor Magenta
-    Write-Host "  $p2" -ForegroundColor Magenta
-    Write-Host "  $p3" -ForegroundColor Magenta
+    Write-Host "  $($msg.Subject)" -ForegroundColor Magenta
+    Write-Host "  $($msg.Body)" -ForegroundColor Magenta
+    Write-Host "  $($msg.World)" -ForegroundColor Magenta
     Write-Host ""
 
     if (-not $AutoPush) {
@@ -142,26 +211,105 @@ function Invoke-Push {
         $note = ''
     }
 
+    $commitFile = Write-CommitFile $msg $note
     & git -C $scriptRoot add -A
-    $commitArgs = @('-m', $subject, '-m', $p2, '-m', $p3)
-    if ($note) { $commitArgs += @('-m', "Note: $note") }
-    & git -C $scriptRoot commit @commitArgs
+    & git -C $scriptRoot commit -F $commitFile
+    Remove-Item -LiteralPath $commitFile -ErrorAction SilentlyContinue
     if ($LASTEXITCODE -ne 0) {
         Write-Fail "Commit failed."
         exit 1
     }
-    Write-OK "Committed: $subject"
+    Write-OK "Committed: $($msg.Subject)"
 
     Write-Step "Pushing..."
     & git -C $scriptRoot push
     if ($LASTEXITCODE -ne 0) {
-        Write-Fail "Push failed. Rule: stop, keep the newest save, then push that one over the remote."
+        Write-Fail "Push failed. Rule: stop, keep the newest save, then run Resolve (option 4)."
         exit 1
     }
     Write-OK "Pushed. Handoff ready - tell the next host to pull."
 }
 
-if ($Pull) {
+function Invoke-Resolve {
+    Write-Step "Fetching latest save..."
+    & git -C $scriptRoot fetch origin 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Fail "Fetch failed. Check your network connection and git credentials."
+        exit 1
+    }
+    $localHead = (& git -C $scriptRoot rev-parse HEAD).Trim()
+    $remoteHead = (& git -C $scriptRoot rev-parse origin/main).Trim()
+    $dirty = @((Get-Porcelain) | Where-Object { $_ }).Count
+
+    if ($localHead -eq $remoteHead -and $dirty -eq 0) {
+        Write-OK "Nothing to resolve - local and remote are already in sync."
+        return
+    }
+
+    $localStats = Get-SaveStats $Slot
+    $remoteStats = Get-SaveStats $Slot 'origin/main'
+
+    Write-Host ""
+    Write-Host "Local save  (this machine):" -ForegroundColor Magenta
+    Show-SaveStats $localStats
+    Write-Host "Remote save (origin/main):" -ForegroundColor Magenta
+    Show-SaveStats $remoteStats
+    Write-Host ""
+
+    $choice = Read-Host "Which save is newer? [L]ocal / [R]emote / [C]ancel"
+    if ($choice -match '^[Ll]') {
+        $confirm = Read-Host "Overwrite the REMOTE save with your LOCAL one? Type 'KEEP-LOCAL' to confirm"
+        if ($confirm -ne 'KEEP-LOCAL') {
+            Write-Warn "Cancelled. Nothing was changed."
+            return
+        }
+        $changed = @((Get-Porcelain) | Where-Object { $_ })
+        if ($changed.Count -gt 0) {
+            $msg = New-CommitMessage $Slot
+            $note = Read-Host "Note for this commit? (Enter to skip)"
+            $commitFile = Write-CommitFile $msg $note
+            & git -C $scriptRoot add -A
+            & git -C $scriptRoot commit -F $commitFile
+            Remove-Item -LiteralPath $commitFile -ErrorAction SilentlyContinue
+            if ($LASTEXITCODE -ne 0) {
+                Write-Fail "Commit failed. Aborting without pushing."
+                exit 1
+            }
+            Write-OK "Committed: $($msg.Subject)"
+        }
+        Write-Step "Force-pushing local save over the remote (newest save wins)..."
+        & git -C $scriptRoot push --force-with-lease origin main
+        if ($LASTEXITCODE -ne 0) {
+            Write-Fail "Force push failed. The remote moved again - re-run Resolve and compare once more."
+            exit 1
+        }
+        Write-OK "Resolved. Your local save is now the shared save - tell the next host to pull."
+    } elseif ($choice -match '^[Rr]') {
+        $confirm = Read-Host "Discard the LOCAL save and use the REMOTE one? Type 'KEEP-REMOTE' to confirm. This deletes your uncommitted local changes."
+        if ($confirm -ne 'KEEP-REMOTE') {
+            Write-Warn "Cancelled. Nothing was changed."
+            return
+        }
+        Write-Step "Restoring the remote save (discarding local changes)..."
+        & git -C $scriptRoot reset --hard origin/main
+        if ($LASTEXITCODE -ne 0) {
+            Write-Fail "Reset failed. Aborting."
+            exit 1
+        }
+        & git -C $scriptRoot clean -fd
+        if ($LASTEXITCODE -ne 0) {
+            Write-Fail "Clean failed."
+            exit 1
+        }
+        Write-OK "Resolved. Your local save was replaced by the remote save."
+    } else {
+        Write-Warn "Cancelled."
+    }
+}
+
+if ($Resolve) {
+    Invoke-Resolve
+} elseif ($Pull) {
     Invoke-Pull
 } elseif ($Push) {
     Invoke-Push
